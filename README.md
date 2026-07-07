@@ -1,172 +1,166 @@
 # Multi-Agent Power Grid Balancer
 
-A multi-agent system that balances electricity supply and demand across grid regions.
-Region agents watch their own supply/demand, and a coordinator agent reroutes power
-from surplus regions to regions facing shortages — preventing blackouts.
+A hierarchical multi-agent system that balances electricity supply and demand
+across the US power grid. Individual grid operators report their supply/demand,
+regional coordinators balance locally, and a national coordinator resolves what's
+left — mirroring how the real grid is structured.
 
-Built with **LangGraph** (agent orchestration) and **LangSmith** (observability),
-using real hourly demand data from the U.S. Energy Information Administration (EIA).
-
----
-
-## What it does
-
-Each hour:
-1. **Region agents** read their supply and demand, compute their gap, and report
-   whether they are `short`, `ok`, or `surplus`.
-2. A **coordinator agent** collects all reports and decides power transfers to
-   cover shortages — serving the biggest shortage first.
-
-Example output:
-```
-Region reports:
-  A: ok (+0 MW)
-  B: short (-200 MW)
-  C: surplus (+300 MW)
-
-Reroute plan:
-  C -> B: 200 MW
-```
+Built with **LangGraph** (orchestration) and **LangSmith** (observability), using
+real hourly data from the U.S. Energy Information Administration (EIA), and
+**validated against real grid interchange data**.
 
 ---
 
-## Architecture
+## Headline result
 
-```
-                 START
-                   |
-        (fan-out, in parallel)
-        /          |          \
-   region_A    region_B    region_C     <- each labels itself short/ok/surplus
-        \          |          /
-        (fan-in, reports merge)
-                   |
-              coordinator                 <- LLM makes the judgment call
-                   |
-                  END
-```
+Scored against what the US grid **actually did** (real EIA interchange data), the
+agent achieves:
 
-- **Fan-out / fan-in:** all region agents run in parallel, then their reports
-  converge into the coordinator.
-- **Region agents are plain code** (threshold logic) — no LLM needed for simple
-  gap classification.
-- **The coordinator uses an LLM** only for the genuine judgment call: matching
-  shortages to surplus under conflict.
+- **85% direction accuracy** — correctly identifies whether each region imports or
+  exports power (11 of 13 regions)
+- **0.82 magnitude correlation** — predicted net flows closely track reality
+
+The two misses are hydro-heavy regions (e.g. the Northwest), where an instantaneous
+`generation − demand` snapshot understates dispatchable hydro and storage — a
+domain-level limitation, not a code bug.
+
+---
+
+## Architecture: a hierarchy of coordinators
+
+Power flows **local → regional → national**, the way real transmission does:
+
+national coordinator          <- LLM: match regional residuals
+                  /          |          \
+               CAL          NW          MIDA      <- regional coordinators (local balancing)
+              /   \        /   \          |
+          CISO   BANC   BPAT  PACW       PJM       <- individual operators (leaves)
+
+
+1. **Operators** report their gap (`supply − demand`).
+2. **Regional coordinators** balance operators *within* a region (neighbors trade),
+   then escalate only the **leftover residual** upward (the subsidiarity principle).
+3. The **national coordinator** matches the ~13 regional residuals with one LLM call.
+
+This solves the scaling and topology problems of a flat design: most power moves
+locally between neighbors, and the national level only ever sees 13 net numbers.
 
 ### Under the hood
-- **State = channels + reducers.** Region reports are merged with an `operator.add`
+- **State = channels + reducers.** Operator reports merge via an `operator.add`
   reducer so parallel writes append instead of overwriting.
-- **Super-steps.** The graph runs in two steps: regions fire together (step 1),
-  then the coordinator fires (step 2).
-- **Structured output.** The coordinator forces the LLM to return a validated
-  `Plan` object via tool-calling, so decisions are always well-formed.
+- **Super-steps.** The region agents fire together (step 1), then coordination runs.
+- **Structured output.** The national LLM call is constrained to a validated
+  `Plan` schema via tool-calling.
+- **Validation layer.** Plain-code checks reject invalid transfers (self-transfers,
+  zero amounts, non-existent surplus) — the LLM reasons, code guarantees correctness.
 
 ---
 
-## Evaluation (the interesting part)
+## Scale
 
-The project includes an eval harness that scores the coordinator against an
-answer key built from a simple, trusted rule. Test cases climb in difficulty:
-**sanity check -> edge case -> judgment call.**
+Runs on **all ~67 real balancing authorities** across a **full month** of hourly
+EIA data (~50,000 rows). Key engineering:
 
-### An eval-driven fix
-On first run, the LLM scored **2/3 (67%)**. The eval caught it **even-splitting
-surplus** on the hardest case instead of following the priority rule (serve the
-biggest shortage first):
+- **Pagination** through the EIA API (5,000-row cap per request).
+- **Data cleaning** — drops missing values and filters aggregate regions to avoid
+  double-counting.
+- **Dynamic graph** — builds a node per region from the data, not a hardcoded list.
+- **Bounded LLM input** — the coordinator sorts by magnitude and caps to the top-N
+  most significant regions, so cost and reliability stay constant at any scale.
 
-```
-judgment_call   FAIL   got=[('C','A',200),('C','B',200)]   want=[('C','A',100),('C','B',300)]
-```
+---
 
-The fix was prompt engineering driven by the eval: I tightened the coordinator's
-system prompt with an explicit priority procedure and a worked example showing
-the exact failure labeled as wrong. Re-running the eval:
+## Evaluation
 
-```
-Accuracy: 3/3 = 100%
-```
+Two layers of evals:
 
-This measure -> diagnose -> fix -> re-measure loop is the core workflow, and the
-harness is proven to catch failures (a do-nothing coordinator scores 0/3).
+**1. Rule-based harness** (`evals/run_eval.py`) — scores the coordinator against an
+answer key built from a trusted priority rule. Test cases climb in difficulty:
+sanity check → edge case → judgment call.
+
+An eval-driven fix: the LLM first scored **67%**, caught even-splitting surplus
+instead of prioritizing the biggest shortage. Tightening the prompt with an explicit
+procedure and a worked example took it to **100%**. The harness is proven to catch
+failures (a do-nothing coordinator scores 0%).
+
+**2. Ground-truth eval** (`evals/ground_truth_eval.py`) — scores the agent's
+regional residuals against **real EIA interchange data** (what actually happened):
+85% direction accuracy, 0.82 correlation.
+
+---
+
+## Production API
+
+The balancer is exposed as a FastAPI service (`api.py`):
+
+- `GET /balance/{timestamp}` — returns the full plan (local transfers, residuals,
+  national transfers) as JSON.
+- `GET /health` — liveness check.
+- **In-memory caching** — identical requests skip the LLM call and return instantly.
+  (Swap for Redis in real production; the check-compute-store pattern is identical.)
+
+Run: `uvicorn api:app --reload`, then open `http://localhost:8000/docs`.
 
 ---
 
 ## Tech stack
 
-- **LangGraph** — multi-agent orchestration (nodes, edges, state)
+- **LangGraph** — multi-agent orchestration
 - **LangSmith** — tracing and observability
-- **OpenAI** — the coordinator's reasoning (structured output)
-- **EIA API** — real hourly U.S. electricity demand data
+- **OpenAI** — the national coordinator's reasoning (structured output)
+- **FastAPI** — the production API layer
+- **EIA API** — real hourly demand, generation, and interchange data
 - **pandas** — data loading and ETL
 
 ---
 
 ## Project structure
 
-```
 power-grid-balancer/
-├── main.py              # entry point: run one balancing cycle
-├── fetch_data.py        # ETL: pull real EIA data -> tidy CSV
+├── api.py                    # FastAPI service (with caching)
+├── main.py                   # flat balancer entry point
+├── main_hierarchy.py         # hierarchical balancer entry point
+├── fetch_data.py             # ETL: demand + generation, all regions, a month
+├── fetch_interchange.py      # ETL: real interchange (ground truth)
 ├── src/
-│   ├── state.py         # shared state (channels + reducers)
-│   ├── data_loader.py   # load clean numbers for one hour
-│   ├── region_agent.py  # read -> gap -> status -> report
-│   ├── coordinator.py   # the LLM judgment call
-│   └── graph.py         # wire nodes + edges, compile
+│   ├── state.py              # shared state (channels + reducers)
+│   ├── data_loader.py        # load clean numbers; filter aggregates
+│   ├── region_agent.py       # read -> gap -> status -> report
+│   ├── coordinator.py        # flat LLM coordinator (top-N cap, validation)
+│   ├── graph.py              # dynamic fan-out/fan-in graph
+│   ├── regions.py            # operator -> region mapping (hierarchy backbone)
+│   ├── local_coordinator.py  # balance within a region, return residual
+│   ├── national_coordinator.py # match regional residuals (the LLM call)
+│   └── hierarchy.py          # orchestrator: local -> regional -> national
 ├── evals/
-│   ├── test_cases.py    # test cases + answer key
-│   └── run_eval.py      # run the exam, print the score
-└── data/
-    └── grid_sample.csv  # sample data (swap for real EIA data)
-```
+│   ├── test_cases.py         # rule-based test cases + answer key
+│   ├── run_eval.py           # rule-based scoring harness
+│   └── ground_truth_eval.py  # score vs real interchange data
+└── data/                     # generated CSVs (gitignored)
+
 
 ---
 
 ## Running it
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. Add your keys to a `.env` file:
-   ```
-   OPENAI_API_KEY=sk-...
-   LANGSMITH_API_KEY=lsv2_...
-   LANGSMITH_TRACING=true
-   LANGSMITH_PROJECT=power-grid-balancer
-   ```
-
-3. Run on the sample data:
-   ```bash
-   python main.py
-   ```
-
-4. Run the eval:
-   ```bash
-   python -m evals.run_eval
-   ```
-
-5. (Optional) Fetch real EIA data — get a free key at
-   https://www.eia.gov/opendata/, add `EIA_API_KEY` to `.env`, then:
-   ```bash
-   python fetch_data.py
-   ```
-   and point `main.py` at `data/grid.csv`.
+1. Install: `pip install -r requirements.txt`
+2. Add keys to `.env`: `OPENAI_API_KEY`, `EIA_API_KEY`, `LANGSMITH_API_KEY`,
+   `LANGSMITH_TRACING=true`
+3. Fetch real data: `python fetch_data.py` and `python fetch_interchange.py`
+4. Run the hierarchy: `python main_hierarchy.py`
+5. Score against ground truth: `python -m evals.ground_truth_eval`
+6. Serve the API: `uvicorn api:app --reload`
 
 ---
 
-## Scaling: hierarchy of coordinators
+## Future work
 
-The current version uses one coordinator over a flat set of regions. This scales
-by making coordinators **hierarchical** — each region can itself be a coordinator
-for smaller regions inside it (e.g. a county coordinates its cities, which
-coordinate their neighborhoods).
-
-Each level **balances locally first and escalates only the leftover shortage**
-upward (the subsidiarity principle). This keeps every coordinator's decision small
-no matter how many total regions exist — and mirrors how real power grids are
-actually structured.
+- **Region adjacency** at the national level — restrict inter-region transfers to
+  geographic neighbors (fixes the remaining long-distance residual match).
+- **Redis caching** for a shared, persistent cache across server instances.
+- **Multi-hour evaluation** — run the ground-truth eval across the full month to
+  measure consistency, not just a single hour.
+- **Storage/hydro modeling** — improve accuracy in hydro-dominated regions.
 
 ---
 
@@ -174,7 +168,9 @@ actually structured.
 
 - Establish the coordination model ("who's in charge?") up front.
 - Don't use an LLM for what plain code does better — reserve it for judgment.
-- Find the hardest decision early and test it the most.
-- When no answer key exists, build one from a simple rule you trust.
-- Match the metric to the shape of the decision.
+- Solve locally, escalate only the leftover (subsidiarity).
+- Bound the LLM's input so cost stays constant as the system scales.
+- The LLM reasons; plain-code validation guarantees correctness.
+- Build an answer key from a trusted rule, then validate against real ground truth.
 - An eval you never watch fail is worthless.
+

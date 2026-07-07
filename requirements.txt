@@ -5,3 +5,5 @@ langsmith
 pandas
 python-dotenv
 requests
+fastapi
+uvicorn

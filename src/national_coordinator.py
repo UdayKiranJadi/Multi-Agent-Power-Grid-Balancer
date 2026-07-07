@@ -1,7 +1,11 @@
-"""National coordinator: balance the regional residuals with the LLM."""
+"""National coordinator: match regional residuals (LLM), then route power
+across the grid through neighbors (multi-hop BFS)."""
 
+from collections import defaultdict
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
+
+from src.routing import find_path
 
 
 class RegionTransfer(BaseModel):
@@ -14,15 +18,15 @@ class NationalPlan(BaseModel):
     transfers: list[RegionTransfer]
 
 
-SYSTEM = """You balance power between REGIONS of the US grid. You get regions
-that are net SHORT (need power) and net SURPLUS (spare power).
+SYSTEM = """You balance power between REGIONS of the US grid. You get net SHORT
+regions (need power) and net SURPLUS regions (spare power). Match surplus to
+shortage -- distance does not matter, the grid will route the power.
 
-FOLLOW THIS EXACT PROCEDURE:
-1. Sort short regions from BIGGEST shortage to smallest.
-2. Fully cover the biggest shortage first before giving power to the next.
-3. Never send more than a surplus region actually has.
-4. Do NOT split surplus evenly. Priority is strict: biggest shortage first.
-5. Every transfer is between two DIFFERENT regions, amount greater than zero.
+PROCEDURE:
+1. Sort short regions from biggest shortage to smallest.
+2. Fully cover the biggest shortage first before moving to the next.
+3. Never send more than a surplus region has. Do not split evenly.
+4. Every transfer is between two different regions; amount > 0.
 """
 
 
@@ -37,8 +41,19 @@ def validate(transfers, short_names, surplus_names):
     return clean
 
 
+def route_matches(matches: list[tuple]) -> list[tuple]:
+    """Expand each region-to-region match into per-hop transfers via shortest path."""
+    edges = defaultdict(int)
+    for src, dst, amount in matches:
+        path = find_path(src, dst)
+        if not path or len(path) < 2:
+            continue
+        for a, b in zip(path, path[1:]):
+            edges[(a, b)] += amount          # each hop carries the power
+    return [(a, b, amt) for (a, b), amt in edges.items()]
+
+
 def balance_national(residuals: dict, planner=None) -> list[tuple]:
-    """residuals: {region: net_MW}. Returns inter-region transfers."""
     shorts = sorted([(r, v) for r, v in residuals.items() if v < 0], key=lambda x: x[1])
     surplus = sorted([(r, v) for r, v in residuals.items() if v > 0], key=lambda x: -x[1])
 
@@ -55,6 +70,5 @@ def balance_national(residuals: dict, planner=None) -> list[tuple]:
     situation = f"SHORT regions: {short_view}\nSURPLUS regions: {surplus_view}"
     result = planner.invoke([("system", SYSTEM), ("human", situation)])
 
-    return validate(result.transfers,
-                    {r for r, _ in shorts},
-                    {r for r, _ in surplus})
+    matches = validate(result.transfers, {r for r, _ in shorts}, {r for r, _ in surplus})
+    return route_matches(matches)            # expand matches into multi-hop routes

@@ -1,4 +1,5 @@
-"""Maps each individual operator (balancing authority) to its EIA region.
+"""Maps each individual operator (balancing authority) to its EIA region,
+and encodes which regions border each other (grid topology).
 
 This is the hierarchy's backbone: operator -> region -> national.
 Groupings follow EIA Form 930.
@@ -37,3 +38,28 @@ OPERATOR_TO_REGION = {
 def region_of(operator: str) -> str | None:
     """Return the region code for an operator, or None if unknown."""
     return OPERATOR_TO_REGION.get(operator)
+
+
+# Which regions physically border each other (simplified US grid topology).
+# The real grid is 3 interconnections -- Eastern, Western, and Texas -- linked
+# only by small DC ties, so bulk power can't jump across the country.
+REGION_NEIGHBORS = {
+    "CAL":  {"NW", "SW"},
+    "NW":   {"CAL", "SW", "CENT"},
+    "SW":   {"CAL", "NW", "CENT", "TEX"},
+    "CENT": {"NW", "SW", "TEX", "MIDW", "SE"},
+    "TEX":  {"SW", "CENT"},
+    "MIDW": {"CENT", "SE", "TEN", "MIDA"},
+    "SE":   {"CENT", "MIDW", "TEN", "CAR", "FLA"},
+    "FLA":  {"SE"},
+    "CAR":  {"SE", "TEN", "MIDA"},
+    "TEN":  {"MIDW", "SE", "CAR", "MIDA"},
+    "MIDA": {"MIDW", "TEN", "CAR", "NY", "NE"},
+    "NY":   {"MIDA", "NE"},
+    "NE":   {"NY", "MIDA"},
+}
+
+
+def are_adjacent(a: str, b: str) -> bool:
+    """True if regions a and b border each other."""
+    return b in REGION_NEIGHBORS.get(a, set())

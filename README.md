@@ -30,12 +30,13 @@ domain-level limitation, not a code bug.
 
 Power flows **local → regional → national**, the way real transmission does:
 
-national coordinator          <- LLM: match regional residuals
-                  /          |          \
-               CAL          NW          MIDA      <- regional coordinators (local balancing)
-              /   \        /   \          |
-          CISO   BANC   BPAT  PACW       PJM       <- individual operators (leaves)
-
+```
+                       national coordinator          <- LLM: match regional residuals
+                      /          |          \
+                   CAL          NW          MIDA      <- regional coordinators (local balancing)
+                  /   \        /   \          |
+              CISO   BANC   BPAT  PACW       PJM       <- individual operators (leaves)
+```
 
 1. **Operators** report their gap (`supply − demand`).
 2. **Regional coordinators** balance operators *within* a region (neighbors trade),
@@ -116,6 +117,7 @@ Run: `uvicorn api:app --reload`, then open `http://localhost:8000/docs`.
 
 ## Project structure
 
+```
 power-grid-balancer/
 ├── api.py                    # FastAPI service (with caching)
 ├── main.py                   # flat balancer entry point
@@ -137,7 +139,7 @@ power-grid-balancer/
 │   ├── run_eval.py           # rule-based scoring harness
 │   └── ground_truth_eval.py  # score vs real interchange data
 └── data/                     # generated CSVs (gitignored)
-
+```
 
 ---
 
@@ -173,4 +175,3 @@ power-grid-balancer/
 - The LLM reasons; plain-code validation guarantees correctness.
 - Build an answer key from a trusted rule, then validate against real ground truth.
 - An eval you never watch fail is worthless.
-

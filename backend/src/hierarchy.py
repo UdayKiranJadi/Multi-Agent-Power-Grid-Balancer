@@ -2,12 +2,15 @@
 
 from collections import defaultdict
 
+from langsmith import traceable
+
 from src.region_agent import make_region_agent
 from src.regions import region_of
 from src.local_coordinator import balance_region
 from src.national_coordinator import balance_national
 
 
+@traceable(name="compute_residuals")
 def compute_residuals(hour: dict) -> tuple[list, dict]:
     """Steps 1-3: reports -> group by region -> local balancing.
     Returns (local_transfers, residuals). No LLM -- pure code, fast and free.
@@ -32,6 +35,7 @@ def compute_residuals(hour: dict) -> tuple[list, dict]:
     return local_transfers, residuals
 
 
+@traceable(name="run_hierarchy")
 def run_hierarchy(hour: dict, planner=None) -> dict:
     """Full run: local balancing + the national LLM match."""
     local_transfers, residuals = compute_residuals(hour)

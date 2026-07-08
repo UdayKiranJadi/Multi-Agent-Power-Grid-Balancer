@@ -4,6 +4,7 @@ across the grid through neighbors (multi-hop BFS)."""
 from collections import defaultdict
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
+from langsmith import traceable
 
 from src.routing import find_path
 
@@ -41,6 +42,7 @@ def validate(transfers, short_names, surplus_names):
     return clean
 
 
+@traceable(name="route_matches")
 def route_matches(matches: list[tuple]) -> list[tuple]:
     """Expand each region-to-region match into per-hop transfers via shortest path."""
     edges = defaultdict(int)
@@ -53,7 +55,14 @@ def route_matches(matches: list[tuple]) -> list[tuple]:
     return [(a, b, amt) for (a, b), amt in edges.items()]
 
 
-def balance_national(residuals: dict, planner=None) -> list[tuple]:
+@traceable(name="match_residuals")
+def match_residuals(residuals: dict, planner=None) -> list[tuple]:
+    """The LLM decision: match SURPLUS regions to SHORT regions.
+
+    Returns region-to-region matches (pre-routing) as (src, dst, amount). This
+    is the coordinator's actual judgment -- what the evals score. The routing
+    below is deterministic plumbing, not a decision.
+    """
     shorts = sorted([(r, v) for r, v in residuals.items() if v < 0], key=lambda x: x[1])
     surplus = sorted([(r, v) for r, v in residuals.items() if v > 0], key=lambda x: -x[1])
 
@@ -70,5 +79,11 @@ def balance_national(residuals: dict, planner=None) -> list[tuple]:
     situation = f"SHORT regions: {short_view}\nSURPLUS regions: {surplus_view}"
     result = planner.invoke([("system", SYSTEM), ("human", situation)])
 
-    matches = validate(result.transfers, {r for r, _ in shorts}, {r for r, _ in surplus})
+    return validate(result.transfers, {r for r, _ in shorts}, {r for r, _ in surplus})
+
+
+@traceable(name="balance_national")
+def balance_national(residuals: dict, planner=None) -> list[tuple]:
+    """Full national step: match residuals (LLM), then route each match multi-hop."""
+    matches = match_residuals(residuals, planner=planner)
     return route_matches(matches)            # expand matches into multi-hop routes

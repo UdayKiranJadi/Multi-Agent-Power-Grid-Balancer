@@ -54,6 +54,8 @@ locally between neighbors, and the national level only ever sees 13 net numbers.
   `Plan` schema via tool-calling.
 - **Validation layer.** Plain-code checks reject invalid transfers (self-transfers,
   zero amounts, non-existent surplus) — the LLM reasons, code guarantees correctness.
+- **Traced end-to-end.** `@traceable` wraps the hierarchy (local → national →
+  routing), so a LangSmith trace shows the whole tree — not just the raw LLM call.
 
 ---
 
@@ -73,20 +75,41 @@ EIA data (~50,000 rows). Key engineering:
 
 ## Evaluation
 
-Two layers of evals:
+Evals at every layer — cheap deterministic checks, LLM-decision scoring in
+LangSmith, and validation against reality.
 
-**1. Rule-based harness** (`evals/run_eval.py`) — scores the coordinator against an
-answer key built from a trusted priority rule. Test cases climb in difficulty:
-sanity check → edge case → judgment call.
+**Rule-based harness** (`evals/run_eval.py`) — scores a coordinator against an
+answer key built from a trusted priority rule. Cases climb in difficulty: sanity
+check → edge case → judgment call. An eval-driven fix: the LLM first scored
+**67%**, caught even-splitting surplus instead of prioritizing the biggest
+shortage; tightening the prompt with an explicit procedure and a worked example
+took it to **100%**. The harness is proven to catch failures (a do-nothing
+coordinator scores 0%).
 
-An eval-driven fix: the LLM first scored **67%**, caught even-splitting surplus
-instead of prioritizing the biggest shortage. Tightening the prompt with an explicit
-procedure and a worked example took it to **100%**. The harness is proven to catch
-failures (a do-nothing coordinator scores 0%).
+**LangSmith eval** (`evals/langsmith_eval.py`) — scores the *production* national
+coordinator (`match_residuals`) against a **versioned LangSmith dataset** of real
+region cases via `langsmith.evaluate()`, so runs become comparable **experiments**
+in the UI. Four evaluators, property-based rather than brittle exact-match:
 
-**2. Ground-truth eval** (`evals/ground_truth_eval.py`) — scores the agent's
-regional residuals against **real EIA interchange data** (what actually happened):
-85% direction accuracy, 0.82 correlation.
+- `exact_match` — did it produce the expected matches?
+- `no_invalid_transfers` — distinct regions, positive amount, real surplus → real short.
+- `respects_surplus` — no region sends more than it has.
+- `covers_biggest_first` — the biggest shortage is covered before smaller ones (no even-splitting).
+
+With no `LANGSMITH_API_KEY`, the same evaluators run locally and print a table —
+so it works in CI with no upload.
+
+**Ground-truth eval** (`evals/ground_truth_eval.py`) — scores the agent's regional
+residuals against **real EIA interchange data** (what actually happened) for one
+hour: **85% direction accuracy, 0.82 correlation**.
+
+**Multi-hour eval** (`evals/multi_hour_eval.py`) — the same comparison batched over
+the **whole month**. No LLM (residuals come from local balancing), so it's fast and
+free; reports overall direction accuracy and per-region correlation.
+
+**Calibrated eval** (`evals/calibrated_eval.py`) — learns a per-region bias offset
+on a training split and *keeps it only if it helps* (guarded), then proves the
+correction on a held-out test set — targeting the hydro-region bias.
 
 ---
 
@@ -107,7 +130,7 @@ Run: `uvicorn api:app --reload`, then open `http://localhost:8000/docs`.
 ## Tech stack
 
 - **LangGraph** — multi-agent orchestration
-- **LangSmith** — tracing and observability
+- **LangSmith** — tracing (`@traceable` over the full hierarchy) + dataset-driven evals
 - **OpenAI** — the national coordinator's reasoning (structured output)
 - **FastAPI** — the production API layer
 - **EIA API** — real hourly demand, generation, and interchange data
@@ -119,39 +142,49 @@ Run: `uvicorn api:app --reload`, then open `http://localhost:8000/docs`.
 
 ```
 power-grid-balancer/
-├── api.py                    # FastAPI service (with caching)
-├── main.py                   # flat balancer entry point
-├── main_hierarchy.py         # hierarchical balancer entry point
-├── fetch_data.py             # ETL: demand + generation, all regions, a month
-├── fetch_interchange.py      # ETL: real interchange (ground truth)
-├── src/
-│   ├── state.py              # shared state (channels + reducers)
-│   ├── data_loader.py        # load clean numbers; filter aggregates
-│   ├── region_agent.py       # read -> gap -> status -> report
-│   ├── coordinator.py        # flat LLM coordinator (top-N cap, validation)
-│   ├── graph.py              # dynamic fan-out/fan-in graph
-│   ├── regions.py            # operator -> region mapping (hierarchy backbone)
-│   ├── local_coordinator.py  # balance within a region, return residual
-│   ├── national_coordinator.py # match regional residuals (the LLM call)
-│   └── hierarchy.py          # orchestrator: local -> regional -> national
-├── evals/
-│   ├── test_cases.py         # rule-based test cases + answer key
-│   ├── run_eval.py           # rule-based scoring harness
-│   └── ground_truth_eval.py  # score vs real interchange data
-└── data/                     # generated CSVs (gitignored)
+├── backend/
+│   ├── api.py                      # FastAPI service (with caching)
+│   ├── main.py                     # flat balancer entry point
+│   ├── main_hierarchy.py           # hierarchical balancer entry point
+│   ├── fetch_data.py               # ETL: demand + generation, all regions, a month
+│   ├── fetch_interchange.py        # ETL: real interchange (ground truth)
+│   ├── .env.example                # copy to .env and fill in keys
+│   ├── src/
+│   │   ├── state.py                # shared state (channels + reducers)
+│   │   ├── data_loader.py          # load clean numbers; filter aggregates
+│   │   ├── region_agent.py         # read -> gap -> status -> report
+│   │   ├── coordinator.py          # flat LLM coordinator (legacy; used by run_eval)
+│   │   ├── graph.py                # dynamic fan-out/fan-in graph
+│   │   ├── regions.py              # operator -> region map + grid topology
+│   │   ├── routing.py              # multi-hop BFS over region adjacency
+│   │   ├── local_coordinator.py    # balance within a region, return residual
+│   │   ├── national_coordinator.py # match residuals (LLM) + multi-hop routing
+│   │   └── hierarchy.py            # orchestrator: local -> regional -> national
+│   ├── evals/
+│   │   ├── test_cases.py           # rule-based cases (flat + national)
+│   │   ├── run_eval.py             # rule-based harness (flat coordinator)
+│   │   ├── langsmith_eval.py       # dataset + evaluate() on the national coordinator
+│   │   ├── ground_truth_eval.py    # one hour vs real interchange
+│   │   ├── multi_hour_eval.py      # whole month: direction + per-region correlation
+│   │   └── calibrated_eval.py      # guarded per-region bias correction
+│   └── data/                       # generated CSVs (gitignored; sample is checked in)
+└── power-grid-dashboard/           # React + Vite map dashboard (frontend)
 ```
 
 ---
 
 ## Running it
 
-1. Install: `pip install -r requirements.txt`
-2. Add keys to `.env`: `OPENAI_API_KEY`, `EIA_API_KEY`, `LANGSMITH_API_KEY`,
-   `LANGSMITH_TRACING=true`
+1. Install: `cd backend && pip install -r requirements.txt`
+2. Copy `.env.example` to `.env` and fill in `OPENAI_API_KEY`, `EIA_API_KEY`,
+   `LANGSMITH_API_KEY`, `LANGSMITH_TRACING=true`
 3. Fetch real data: `python fetch_data.py` and `python fetch_interchange.py`
 4. Run the hierarchy: `python main_hierarchy.py`
-5. Score against ground truth: `python -m evals.ground_truth_eval`
-6. Serve the API: `uvicorn api:app --reload`
+5. Score the national coordinator: `python -m evals.langsmith_eval`
+   (uploads a LangSmith experiment; prints a local table if no LangSmith key)
+6. Score against ground truth: `python -m evals.ground_truth_eval`
+7. Serve the API: `uvicorn api:app --reload`
+8. (optional) Run the dashboard: `cd ../power-grid-dashboard && npm install && npm run dev`
 
 ---
 
@@ -160,8 +193,8 @@ power-grid-balancer/
 - **Region adjacency** at the national level — restrict inter-region transfers to
   geographic neighbors (fixes the remaining long-distance residual match).
 - **Redis caching** for a shared, persistent cache across server instances.
-- **Multi-hour evaluation** — run the ground-truth eval across the full month to
-  measure consistency, not just a single hour.
+- **LLM-as-judge evaluators** — add a reasoning-quality judge in LangSmith
+  alongside the property-based checks.
 - **Storage/hydro modeling** — improve accuracy in hydro-dominated regions.
 
 ---

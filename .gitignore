@@ -3,4 +3,7 @@ backend/.env
 .DS_Store
 __pycache__/
 *.pyc
-backend/data/interchange.csv
+# Generated EIA data — regenerate with fetch_data.py / fetch_interchange.py.
+# Keep the tiny checked-in sample so tests/demos have a fixture.
+backend/data/*.csv
+!backend/data/grid_sample.csv

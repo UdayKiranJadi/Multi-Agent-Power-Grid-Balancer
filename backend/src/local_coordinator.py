@@ -1,6 +1,9 @@
 """Local coordinator: balance operators WITHIN one region, escalate the leftover."""
 
+from langsmith import traceable
 
+
+@traceable(name="balance_region")
 def balance_region(reports: list[dict]) -> tuple[list[tuple], int]:
     """Balance operators inside ONE region.
 

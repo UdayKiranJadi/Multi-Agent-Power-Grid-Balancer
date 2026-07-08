@@ -60,21 +60,35 @@ body {
   box-shadow: 0 0 0 3px rgba(95, 211, 255, 0.15);
 }
 
-.live-badge {
+.live-btn {
   display: inline-flex; align-items: center; gap: 7px;
-  font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
-  color: #6ee7b7;
-  padding: 5px 10px; border-radius: 999px;
-  background: rgba(110, 231, 183, 0.1);
-  border: 1px solid rgba(110, 231, 183, 0.25);
+  font-size: 12px; font-weight: 700; letter-spacing: 0.05em;
+  color: #8ea3c4; cursor: pointer;
+  padding: 7px 13px; border-radius: 999px;
+  background: rgba(142, 163, 196, 0.08);
+  border: 1px solid #33456b;
+  transition: all 0.15s;
 }
-.live-badge.is-loading { color: #fbbf72; background: rgba(251, 191, 114, 0.1); border-color: rgba(251, 191, 114, 0.25); }
+.live-btn:hover { border-color: #5a76ad; color: #cdd9ee; }
+.live-btn.on {
+  color: #6ee7b7;
+  background: rgba(110, 231, 183, 0.12);
+  border-color: rgba(110, 231, 183, 0.4);
+}
+.live-btn .live-dot { opacity: 0.5; animation: none; }
+.live-btn.on .live-dot { opacity: 1; animation: blink 1.4s ease-in-out infinite; }
 .live-dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: currentColor; box-shadow: 0 0 8px currentColor;
-  animation: blink 1.4s ease-in-out infinite;
 }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.sync { font-size: 12px; color: #6f83a6; }
+
+.data-note {
+  font-size: 13px; color: #6f83a6; margin: 0 0 16px;
+}
+.data-note strong { color: #cdd9ee; font-weight: 600; }
 
 /* ---------- Content ---------- */
 .content {

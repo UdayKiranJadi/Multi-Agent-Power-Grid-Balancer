@@ -4,11 +4,13 @@ import { STATE_TO_REGION } from "./stateToRegion";
 import { REGION_COORDS } from "./regionCoords";
 import "./App.css";
 
-const API = "https://power-grid-balancer.onrender.com";
+// Config, not code: point at a local backend with VITE_API_URL during dev.
+const API = import.meta.env.VITE_API_URL || "https://power-grid-balancer.onrender.com";
 const GEO_URL = "https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json";
 
-const MIN_HOUR = "2024-01-01T00";
-const MAX_HOUR = "2024-02-01T00";
+const MIN_HOUR = "2019-01-01T00";              // EIA hourly history goes back years
+const DEFAULT_HOUR = "2024-01-01T00";          // shown until /latest resolves
+const LIVE_REFRESH_MS = 5 * 60 * 1000;         // re-check "latest" every 5 min
 const NON_MAINLAND = new Set(["02", "15", "72", "78", "60", "66", "69"]);
 
 function fillFor(mw) {
@@ -18,11 +20,25 @@ function fillFor(mw) {
 }
 
 export default function App() {
-  const [hour, setHour] = useState(MIN_HOUR);
+  const [hour, setHour] = useState(DEFAULT_HOUR);
+  const [latest, setLatest] = useState(null);   // newest hour the backend can serve
+  const [live, setLive] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // On load: ask the backend for the latest available hour and open on it (live).
+  // If the backend has no /latest yet (old deploy), we quietly stay on DEFAULT_HOUR.
+  useEffect(() => {
+    fetch(`${API}/latest`)
+      .then((r) => r.json())
+      .then(({ timestamp }) => {
+        if (timestamp) { setLatest(timestamp); setHour(timestamp); setLive(true); }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Fetch the balance whenever the selected hour changes.
   useEffect(() => {
     setLoading(true);
     setError(null);
@@ -31,6 +47,36 @@ export default function App() {
       .then((d) => { setData(d); setLoading(false); })
       .catch((e) => { setError(e.message); setLoading(false); });
   }, [hour]);
+
+  // While live, poll for a newer hour and follow it.
+  useEffect(() => {
+    if (!live) return;
+    const id = setInterval(() => {
+      fetch(`${API}/latest`)
+        .then((r) => r.json())
+        .then(({ timestamp }) => {
+          if (timestamp) { setLatest(timestamp); setHour(timestamp); }
+        })
+        .catch(() => {});
+    }, LIVE_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [live]);
+
+  // Manually picking an hour drops out of live mode.
+  const pickHour = (e) => {
+    const v = e.target.value.slice(0, 13);
+    if (v) { setLive(false); setHour(v); }
+  };
+
+  // "Go Live" jumps to the latest hour and starts following it.
+  const toggleLive = async () => {
+    if (live) { setLive(false); return; }
+    try {
+      const { timestamp } = await fetch(`${API}/latest`).then((r) => r.json());
+      if (timestamp) { setLatest(timestamp); setHour(timestamp); }
+    } catch { /* enable anyway; the poll will catch up */ }
+    setLive(true);
+  };
 
   const residuals = data?.residuals || {};
   const transfers = data?.national_transfers || [];
@@ -62,25 +108,38 @@ export default function App() {
         </div>
 
         <div className="nav-controls">
-          <span className={`live-badge${loading ? " is-loading" : ""}`}>
+          <button
+            type="button"
+            className={`live-btn${live ? " on" : ""}`}
+            onClick={toggleLive}
+            title="Jump to the latest hour and auto-refresh"
+          >
             <span className="live-dot" />
-            {loading ? "SYNCING" : "LIVE"}
-          </span>
+            {live ? "LIVE" : "Go Live"}
+          </button>
           <label htmlFor="hour">Hour</label>
           <input
             id="hour"
             type="datetime-local"
             step="3600"
             min={MIN_HOUR + ":00"}
-            max={MAX_HOUR + ":00"}
+            max={(latest || DEFAULT_HOUR) + ":00"}
             value={hour + ":00"}
-            onChange={(e) => { const v = e.target.value.slice(0, 13); if (v) setHour(v); }}
+            onChange={pickHour}
           />
+          {loading && <span className="sync">syncing…</span>}
         </div>
       </nav>
 
       <main className="content">
         {error && <p className="error">Error: {error}</p>}
+
+        <p className="data-note">
+          Viewing <strong>{hour.replace("T", " ")}:00</strong>
+          {live ? " · following live" : " · history"}
+          {latest && <> · latest available {latest.replace("T", " ")}:00</>}
+          {data?.cached && <> · cached</>}
+        </p>
 
         <div className="stats">
           <div className="stat">

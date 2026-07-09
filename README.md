@@ -6,8 +6,12 @@ regional coordinators balance locally, and a national coordinator resolves what'
 left — mirroring how the real grid is structured.
 
 Built with **LangGraph** (orchestration) and **LangSmith** (observability), using
-real hourly data from the U.S. Energy Information Administration (EIA), and
+**live** hourly data from the U.S. Energy Information Administration (EIA), and
 **validated against real grid interchange data**.
+
+**[Live demo →](https://multi-agent-power-grid-balancer.vercel.app)** — an
+interactive US map: scrub to any hour, or hit **Go Live** to follow the latest
+published grid data.
 
 ---
 
@@ -119,11 +123,17 @@ The balancer is exposed as a FastAPI service (`api.py`):
 
 - `GET /balance/{timestamp}` — returns the full plan (local transfers, residuals,
   national transfers) as JSON.
-- `GET /health` — liveness check.
-- **In-memory caching** — identical requests skip the LLM call and return instantly.
-  (Swap for Redis in real production; the check-compute-store pattern is identical.)
+- `GET /latest` — the most recent hour that can be served (drives the "Go Live" button).
+- `GET /health` — liveness check (reports whether live data is available).
+- **Live data.** Each hour is fetched **on demand from the EIA API** (`src/eia_client.py`),
+  so any hour from EIA's history through the latest published one is queryable — not a
+  frozen snapshot. Falls back to the static CSV if no `EIA_API_KEY` is set.
+- **In-memory caching** — a given hour is computed once (one EIA call + one LLM call),
+  then served instantly. (Swap for Redis in real production; the check-compute-store
+  pattern is identical.)
 
 Run: `uvicorn api:app --reload`, then open `http://localhost:8000/docs`.
+(Set `EIA_API_KEY` for live data; the frontend points at the backend via `VITE_API_URL`.)
 
 ---
 
@@ -152,6 +162,7 @@ power-grid-balancer/
 │   ├── src/
 │   │   ├── state.py                # shared state (channels + reducers)
 │   │   ├── data_loader.py          # load clean numbers; filter aggregates
+│   │   ├── eia_client.py           # live EIA fetch: one hour on demand + latest hour
 │   │   ├── region_agent.py         # read -> gap -> status -> report
 │   │   ├── coordinator.py          # flat LLM coordinator (legacy; used by run_eval)
 │   │   ├── graph.py                # dynamic fan-out/fan-in graph
@@ -178,13 +189,16 @@ power-grid-balancer/
 1. Install: `cd backend && pip install -r requirements.txt`
 2. Copy `.env.example` to `.env` and fill in `OPENAI_API_KEY`, `EIA_API_KEY`,
    `LANGSMITH_API_KEY`, `LANGSMITH_TRACING=true`
-3. Fetch real data: `python fetch_data.py` and `python fetch_interchange.py`
+3. (optional) Fetch a static dataset for the evals / offline fallback:
+   `python fetch_data.py` and `python fetch_interchange.py` — the live API fetches
+   on demand, so this is only needed for the eval scripts below.
 4. Run the hierarchy: `python main_hierarchy.py`
 5. Score the national coordinator: `python -m evals.langsmith_eval`
    (uploads a LangSmith experiment; prints a local table if no LangSmith key)
 6. Score against ground truth: `python -m evals.ground_truth_eval`
-7. Serve the API: `uvicorn api:app --reload`
-8. (optional) Run the dashboard: `cd ../power-grid-dashboard && npm install && npm run dev`
+7. Serve the API: `uvicorn api:app --reload` (live data needs `EIA_API_KEY`)
+8. Run the dashboard against your local API:
+   `cd ../power-grid-dashboard && npm install && VITE_API_URL=http://localhost:8000 npm run dev`
 
 ---
 
